@@ -26,7 +26,7 @@ def stand(robot: aliengo_py.Robot, kp=40.0, kd=2.0, completion_time=5.0):
     init_q = np.zeros(12, dtype=np.float32)
 
     # Standing position (adjusted for Aliengo)
-    stand_q = np.array([0.0, 0.8, -1.5, 0.0, 0.8, -1.5, 0.0, 1.0, -1.5, 0.0, 1.0, -1.5])
+    # stand_q = np.array([0.0, 0.8, -1.5, 0.0, 0.8, -1.5, 0.0, 1.0, -1.5, 0.0, 1.0, -1.5])
     stand_q = np.array([0.0, 0.8, -1.5, 0.0, 0.8, -1.5, 0.0, 0.8, -1.5, 0.0, 0.8, -1.5])
     # reset pos [-0.2, 1.16, -2.7, 0.2, 1.16, -2.7, -0.2, 1.16, -2.78, 0.2, 1.16, -2.7]
 
@@ -43,32 +43,34 @@ def stand(robot: aliengo_py.Robot, kp=40.0, kd=2.0, completion_time=5.0):
         robot_state = robot.get_state()
         print("jpos: ", np.array(robot_state.jpos))
         
-        t = time.time() - st
-        if t > completion_time:
-            t = completion_time
-
-        # Interpolate between initial position and standing position
-        target_q = stand_q * (t / completion_time) + init_q * (1 - t / completion_time)
-
+        t = time.time()
+        alpha = max(0.0, min(1.0, (t - st) / completion_time))
+        target_q = alpha * stand_q + (1 - alpha) * init_q
         robot_command.jpos_des = target_q.tolist()
-        # print("jpos_des: ", target_q)
         robot.set_command(robot_command)
 
-        if t >= completion_time:
+        if t - st >= completion_time:
             print("Standing complete.")
             break
 
-        time.sleep(max(1 / 500 + t - time.time(), 0))
+        elapsed_time = time.time() - t
+        sleep_time = max(1 / 50 - elapsed_time, 0)
+        actual_freq = 1 / (sleep_time + elapsed_time)
+        print("Elapsed time: ", elapsed_time)
+        print("Actual freq: ", actual_freq)
+        print("Sleep time: ", sleep_time)
+        time.sleep(sleep_time)
 
 def main():
     control_freq = 500
-    robot = aliengo_py.Robot(control_freq, 1)
+    robot = aliengo_py.Robot(control_freq)
     robot.start_control()
 
     print("Robot initialized. Press Enter to start standing...")
     input()
 
-    stand(robot, kp=60.0, kd=2.0, completion_time=500.0)
+    # stand(robot, kp=0.0, kd=2.0, completion_time=5.0)
+    stand(robot, kp=60.0, kd=2.0, completion_time=5.0)
 
     print("Robot is now in standing position. Press Enter to exit...")
     input()
