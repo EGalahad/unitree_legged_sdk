@@ -20,7 +20,12 @@ link_directories(lib/cpp/${ARCH})
 set(EXTRA_LIBS -pthread libunitree_legged_sdk.so lcm)
 
 set(CMAKE_CXX_FLAGS "-O3 -fPIC")
- 
+
+option(PYTHON_BUILD "build python wrapper" OFF)
+if(PYTHON_BUILD)
+  add_subdirectory(python_wrapper)
+endif()
+
 add_executable(example_walk_aliengo examples/example_walk_aliengo_sport.cpp)
 target_link_libraries(example_walk_aliengo ${EXTRA_LIBS})
 
