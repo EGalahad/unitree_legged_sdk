@@ -127,9 +127,9 @@ class AliengoInterface {
         float w = robot_state.quat[0], x = -robot_state.quat[1],
               y = -robot_state.quat[2], z = -robot_state.quat[3];
         float x2 = x * x, y2 = y * y, z2 = z * z, w2 = w * w;
-        robot_state.projected_gravity[0] = 2 * (x * z - w * y);
-        robot_state.projected_gravity[1] = 2 * (y * z + w * x);
-        robot_state.projected_gravity[2] = w2 - x2 - y2 + z2;
+        robot_state.projected_gravity[0] = - 2 * (x * z - w * y);
+        robot_state.projected_gravity[1] = - 2 * (y * z + w * x);
+        robot_state.projected_gravity[2] = - (w2 - x2 - y2 + z2);
 
         // Joint states
         for (int i = 0; i < 12; ++i) {
