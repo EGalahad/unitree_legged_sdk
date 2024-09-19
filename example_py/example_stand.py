@@ -73,8 +73,8 @@ def main():
     print("Robot initialized. Press Enter to start standing...")
     input()
 
-    # stand(robot, kp=0.0, kd=2.0, completion_time=5.0)
-    stand(robot, kp=60.0, kd=2.0, completion_time=50.0)
+    # stand(robot, kp=0.0, kd=2.0, completion_time=50.0)
+    stand(robot, kp=60.0, kd=2.0, completion_time=5.0)
 
     print("Robot is now in standing position. Press Enter to exit...")
     input()
