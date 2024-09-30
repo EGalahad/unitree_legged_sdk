@@ -38,22 +38,19 @@ SDK_JOINT_ORDER = [
 ]
 
 
+# fmt: off
 default_joint_pos = np.array(
     [
-        0.2,
-        -0.2,
-        0.2,
-        -0.2,
-        0.8,
-        0.8,
-        0.8,
-        0.8,
-        -1.5,
-        -1.5,
-        -1.5,
-        -1.5,
+        # 0.1, -0.1, 0.1, -0.1,
+        # 0.8, 0.8, 0.8, 0.8,
+        # -1.5, -1.5, -1.5, -1.5,
+
+        0.2, -0.2, 0.2, -0.2,
+        1.0, 1.0, 1.0, 1.0,
+        -1.8, -1.8, -1.8, -1.8,
     ],
 )
+# fmt on
 
 
 def normalize(v: np.ndarray):
@@ -63,6 +60,10 @@ def normalize(v: np.ndarray):
 def mix(a: np.ndarray, b: np.ndarray, alpha: float):
     return a * (1 - alpha) + b * alpha
 
+def wrap_to_pi(a: np.ndarray):
+    # wrap to -pi to pi
+    a = np.mod(a + np.pi, 2 * np.pi) - np.pi
+    return a
 
 def orbit_to_sdk(joints: np.ndarray):
     return np.flip(joints.reshape(3, 2, 2), axis=2).transpose(1, 2, 0).reshape(-1)
@@ -86,19 +87,79 @@ class JoyStickFlat(CommandManager):
 
     command_dim = 4
 
-    max_speed = 1.0
+    max_speed_x = 1.0
+    max_speed_y = 0.5
     max_angvel = 1.0
 
     def update(self):
         robot_state = self._robot.get_state()
-        self.command[0] = mix(self.command[0], robot_state.lxy[1] * self.max_speed, 0.2)
+        self.command[0] = mix(self.command[0], robot_state.lxy[1] * self.max_speed_x, 0.2)
         self.command[1] = mix(
-            self.command[1], -robot_state.lxy[0] * self.max_speed, 0.2
+            self.command[1], -robot_state.lxy[0] * self.max_speed_y, 0.2
         )
         self.command[2] = mix(
             self.command[2], -robot_state.rxy[0] * self.max_angvel, 0.2
         )
         self.command[3] = 0.0
+
+
+class FixedCommandForce(CommandManager):
+    command_dim = 10
+
+    setpoint_pos_b = np.array([1.0, 0.0, 0.0])
+    yaw_diff = 0.0
+
+    kp = 5.0
+    kd = 3.0
+    virtual_mass = 10.0
+
+    def update(self):
+        self.command[:2] = self.setpoint_pos_b[:2]
+        self.command[2] = self.yaw_diff
+        self.command[3:5] = self.kp * self.setpoint_pos_b[:2]
+        self.command[5:8] = self.kd
+        self.command[8] = self.kp * self.yaw_diff
+        self.command[9] = self.virtual_mass
+        
+class JoyStickForce_xy_yaw(FixedCommandForce):
+    max_pos_x_b = 1.0
+    max_pos_y_b = 1.0
+    max_angvel = 0.7
+
+    def __init__(self, robot: aliengo_py.Robot) -> None:
+        super().__init__(robot)
+        self._init_yaw = self._robot.get_state().rpy[2]
+        self._target_yaw = 0.0
+        self._angvel = 0.0
+    
+    def update(self):
+        robot_state = self._robot.get_state()
+
+        self._angvel = mix(self._angvel, -robot_state.rxy[0] * self.max_angvel, 0.2)
+        self._target_yaw += self._angvel * 0.02
+
+        self.yaw_diff = wrap_to_pi(self._target_yaw + self._init_yaw - robot_state.rpy[2])
+        self.yaw_diff = 0
+        self.setpoint_pos_b[0] = mix(self.setpoint_pos_b[0], robot_state.lxy[1] * self.max_pos_x_b, 0.2)
+        self.setpoint_pos_b[1] = mix(self.setpoint_pos_b[1], -robot_state.lxy[0] * self.max_pos_y_b, 0.2)
+        
+        super().update()
+    
+class JoyStickForce_xy_kp(FixedCommandForce):
+    max_pos_x_b = 1.0
+    max_pos_y_b = 1.0
+    max_kp = 10.0
+    min_kp = 2.0
+
+    def update(self):
+        robot_state = self._robot.get_state()
+        
+        self.kp = (robot_state.rxy[1] + 1) / 2 * (self.max_kp - self.min_kp) + self.min_kp
+        
+        self.setpoint_pos_b[0] = mix(self.setpoint_pos_b[0], robot_state.lxy[1] * self.max_pos_x_b, 0.2)
+        self.setpoint_pos_b[1] = mix(self.setpoint_pos_b[1], -robot_state.lxy[0] * self.max_pos_y_b, 0.2)
+        
+        super().update()
 
 
 class ActionManager:
@@ -128,7 +189,7 @@ class JointPositionAction(ActionManager):
         self,
         robot: Robot,
         clip_joint_targets: float = 1.6,
-        alpha: float = 0.8,
+        alpha: float = 0.9,
         action_scaling: float = 0.5,
     ) -> None:
         super().__init__(robot)
@@ -174,9 +235,9 @@ class EnvBase:
     def reset(self):
         self.update()
         self.command_manager.update()
-        return self._compute_obs()
+        return self.compute_obs()
 
-    def step(self, action: np.ndarray):
+    def apply_action(self, action: np.ndarray):
         raise NotImplementedError
         action = self.action_manager.step(action)
         self.action_buf[:, 1:] = self.action_buf[:, :-1]
@@ -184,13 +245,13 @@ class EnvBase:
 
         self.update()
         self.command_manager.update()
-        return self._compute_obs()
+        return self.compute_obs()
 
     def update(self):
         """Update the environment state buffers."""
         raise NotImplementedError
 
-    def _compute_obs(self):
+    def compute_obs(self):
         """Compute the observation from the environment state buffers."""
         raise NotImplementedError
 
@@ -257,7 +318,9 @@ class FlatEnv(EnvBase):
         # self.latency = (datetime.datetime.now() - self._robot.timestamp).total_seconds()
         # self.timestamp = time.perf_counter()
 
-    def _compute_obs(self):
+    def compute_obs(self):
+        self.update()
+        self.command_manager.update()
 
         obs = [
             self.command_manager.command,
@@ -269,11 +332,8 @@ class FlatEnv(EnvBase):
         obs = np.concatenate(obs, dtype=np.float32)
         return obs
     
-    def step(self, action_sim: np.ndarray):
-        action_sim = self.action_manager.step(action_sim)
-        self.action_buf[:, 1:] = self.action_buf[:, :-1]
-        self.action_buf[:, 0] = action_sim
-        
-        self.update()
-        self.command_manager.update()
-        return self._compute_obs()
+    def apply_action(self, action_sim: np.ndarray = None):
+        if action_sim is not None:
+            self.action_manager.step(action_sim)
+            self.action_buf[:, 1:] = self.action_buf[:, :-1]
+            self.action_buf[:, 0] = action_sim

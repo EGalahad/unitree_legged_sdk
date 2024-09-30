@@ -40,7 +40,10 @@ def main():
     )
     print("Environment created")
 
-    path = "policy-alienflat-397.pt"
+    # path = "policy-alienflat-397.pt"
+    path = "policy-alienflat-681.pt"
+    action_manager.kp = 40.0
+    action_manager.robot_cmd.kp = [40.0] * 12
     policy = torch.load(path)
     policy.module[0].set_missing_tolerance(True)
     # policy = lambda td: torch.zeros(12)
@@ -56,7 +59,7 @@ def main():
     input()
 
     obs = env.reset()
-    obs = env._compute_obs()
+    obs = env.compute_obs()
     print(obs.shape)
     print(policy)
     # policy.module.pop(0)
@@ -76,6 +79,13 @@ def main():
         with torch.inference_mode(), set_exploration_type(ExplorationType.MODE):
             for i in itertools.count():
                 start = time.perf_counter()
+
+                obs = torch.as_tensor(env.compute_obs())
+                td["next", "policy"] = obs.unsqueeze(0)
+                td["next", "is_init"] = torch.tensor([0], dtype=bool)
+
+                td = td["next"]
+
                 try:
                     policy(td)
                 except Exception as e:
@@ -83,20 +93,14 @@ def main():
                     breakpoint()
                 action = td["action"].squeeze(0).cpu().numpy()
 
-                obs = torch.as_tensor(env.step(action))
-                td["next", "policy"] = obs.unsqueeze(0)
-                td["next", "is_init"] = torch.tensor([0], dtype=bool)
-
-                # if i % 25 == 0:
-                #     print(env.projected_gravity)
-                # print(env.command)
-                # print(robot.jpos_sdk.reshape(4, 3))
-                # print(robot.sdk_to_orbit(robot.jpos_sdk).reshape(3, 4))
-
-                td = td["next"]
+                env.apply_action(action)
 
                 elapsed = time.perf_counter() - start
                 # print(f"{i}: {elapsed:.4f}s")
+                freq = 1 / max(elapsed, dt)
+                if i % 20 == 0:
+                    print("command:", command_manager.command)
+                    print(f"freq: {freq:.2f}Hz")
                 time.sleep(max(0, dt - elapsed))
 
     except KeyboardInterrupt:
