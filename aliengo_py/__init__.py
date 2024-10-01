@@ -1,5 +1,7 @@
 # aliengo_py/__init__.py
 import numpy as np
+import h5py
+from scipy.spatial.transform import Rotation as R
 from typing import List
 from . import aliengo_py
 
@@ -41,13 +43,13 @@ SDK_JOINT_ORDER = [
 # fmt: off
 default_joint_pos = np.array(
     [
-        # 0.1, -0.1, 0.1, -0.1,
-        # 0.8, 0.8, 0.8, 0.8,
-        # -1.5, -1.5, -1.5, -1.5,
+        0.1, -0.1, 0.1, -0.1,
+        0.8, 0.8, 0.8, 0.8,
+        -1.5, -1.5, -1.5, -1.5,
 
-        0.2, -0.2, 0.2, -0.2,
-        1.0, 1.0, 1.0, 1.0,
-        -1.8, -1.8, -1.8, -1.8,
+        # 0.2, -0.2, 0.2, -0.2,
+        # 1.0, 1.0, 1.0, 1.0,
+        # -1.8, -1.8, -1.8, -1.8,
     ],
 )
 # fmt on
@@ -70,6 +72,9 @@ def orbit_to_sdk(joints: np.ndarray):
 
 def sdk_to_orbit(joints: np.ndarray):
     return np.flip(joints.reshape(2, 2, 3), axis=1).transpose(2, 0, 1).reshape(-1)
+
+print(sdk_to_orbit(np.array(SDK_JOINT_ORDER)) == np.array(ORBIT_JOINT_ORDER))
+print(orbit_to_sdk(np.array(ORBIT_JOINT_ORDER)) == np.array(SDK_JOINT_ORDER))
 
 class CommandManager:
 
@@ -207,10 +212,8 @@ class JointPositionAction(ActionManager):
     def step(self, action_sim: np.ndarray) -> np.ndarray:
         action_sim = action_sim.clip(-6, 6)
         self.action = mix(self.action, action_sim, self.alpha)
-        jpos_target = (self.action * self.action_scaling).clip(
-            -self.clip_joint_targets, self.clip_joint_targets
-        ) + default_joint_pos
-        self.robot_cmd.jpos_des = orbit_to_sdk(jpos_target).tolist()
+        self.jpos_target = (self.action * self.action_scaling) + default_joint_pos
+        self.robot_cmd.jpos_des = orbit_to_sdk(self.jpos_target).tolist()
         # print(self.robot_cmd.jpos_des)
         self._robot.set_command(self.robot_cmd)
         return action_sim
@@ -268,12 +271,14 @@ class FlatEnv(EnvBase):
         robot: Robot,
         command_manager: CommandManager,
         action_manager: ActionManager,
+        log_file: h5py.File = None
     ) -> None:
         super().__init__(
             robot=robot,
             command_manager=command_manager,
             action_manager=action_manager,
         )
+        self.log_file = log_file
 
         # obs
         self.jpos_sdk = np.zeros(12)
@@ -287,8 +292,47 @@ class FlatEnv(EnvBase):
         # self.rpy = np.zeros(3)
         # self.angvel_history = np.zeros((3, self.smoothing_length))
         # self.angvel = np.zeros(3)
-        self.projected_gravity_history = np.zeros((3, self.smoothing_length))
+        self.projected_gravity_history = np.zeros((3, 1))
         self.projected_gravity = np.zeros(3)
+
+        self.obs_dim = self.compute_obs().shape[-1]
+
+        self.step_count = 0
+        if self.log_file is not None:
+            default_len = 50 * 60
+            self.log_file.attrs["cursor"] = 0
+            self.log_file.create_dataset("observation", (default_len, self.obs_dim), maxshape=(None, self.obs_dim))
+            self.log_file.create_dataset("action", (default_len, 12), maxshape=(None, 12))
+
+            self.log_file.create_dataset("rpy", (default_len, 3), maxshape=(None, 3))
+            self.log_file.create_dataset("jpos", (default_len, 12), maxshape=(None, 12))
+            self.log_file.create_dataset("jvel", (default_len, 12), maxshape=(None, 12))
+            self.log_file.create_dataset("jpos_des", (default_len, 12), maxshape=(None, 12))
+            self.log_file.create_dataset("tau_est", (default_len, 12), maxshape=(None, 12))
+            self.log_file.create_dataset("quat", (default_len, 4), maxshape=(None, 4))
+            self.log_file.create_dataset("linvel", (default_len, 3), maxshape=(None, 3))
+            self.log_file.create_dataset("angvel", (default_len, 3), maxshape=(None, 3))
+
+    def _maybe_log(self):
+        if self.log_file is None:
+            return
+        self.log_file["observation"][self.step_count] = self.obs
+        self.log_file["action"][self.step_count] = self.action_buf[:, 0]
+        # self.log_file["angvel"][self.step_count] = self.angvel
+        # self.log_file["linvel"][self.step_count] = self._robot.get_velocity()
+        self.log_file["rpy"][self.step_count] = np.array(self.robot_state.rpy)
+        self.log_file["jpos"][self.step_count] = self.jpos_sim
+        self.log_file["jvel"][self.step_count] = self.jvel_sim
+        self.log_file["jpos_des"][self.step_count] = self.action_manager.jpos_target
+        # self.log_file["tau_est"][self.step_count] = self.tau_sim
+        self.log_file.attrs["cursor"] = self.step_count
+
+        if self.step_count == self.log_file["jpos"].len() - 1:
+            new_len = self.step_count + 1 + 3000
+            print(f"Extend log size to {new_len}.")
+            for key, value in self.log_file.items():
+                value.resize((new_len, value.shape[1]))
+        self.step_count += 1
 
     def update(self):
         self.robot_state = self.robot.get_state()
@@ -308,11 +352,13 @@ class FlatEnv(EnvBase):
         #     self.angvel, self.angvel_history.mean(axis=1), self.smoothing_ratio
         # )
 
-        self.projected_gravity_history[:] = np.roll(
-            self.projected_gravity_history, 1, axis=1
-        )
-        self.projected_gravity_history[:, 0] = self.robot_state.projected_gravity
-        self.projected_gravity[:] = normalize(self.projected_gravity_history.mean(1))
+        rpy = R.from_euler("xyz", self.robot_state.rpy)
+        gravity = rpy.inv().apply(np.array([0., 0., -1.]))
+        # self.projected_gravity_history[:] = np.roll(
+        #     self.projected_gravity_history, 1, axis=1
+        # )
+        # self.projected_gravity_history[:, 0] = gravity # self.robot_state.projected_gravity
+        self.projected_gravity = gravity #normalize(self.projected_gravity_history.mean(1))
 
         # TODO: add latency measurements
         # self.latency = (datetime.datetime.now() - self._robot.timestamp).total_seconds()
@@ -329,11 +375,12 @@ class FlatEnv(EnvBase):
             self.jvel_sim,
             self.action_buf[:, : self.action_buf_steps].reshape(-1),
         ]
-        obs = np.concatenate(obs, dtype=np.float32)
-        return obs
+        self.obs = np.concatenate(obs, dtype=np.float32)
+        return self.obs
     
     def apply_action(self, action_sim: np.ndarray = None):
         if action_sim is not None:
             self.action_manager.step(action_sim)
             self.action_buf[:, 1:] = self.action_buf[:, :-1]
             self.action_buf[:, 0] = action_sim
+        self._maybe_log()
